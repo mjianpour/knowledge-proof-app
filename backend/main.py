@@ -14,14 +14,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from backend import challenges, config, github_sync, llm, pdf_ingest
+from backend import db as db_mod
 from backend.db import db, get_setting, set_setting
 
 app = FastAPI(title="Deep Dive Tracker API")
 
 # Local single-user tool: the frontend is served from another localhost port.
+# If you run the frontend on a non-default port (knowledge run --frontend-port),
+# add that origin here too.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -38,43 +45,101 @@ def health():
 
 class SettingsUpdate(BaseModel):
     github_repo_url: str | None = None
-    llm_provider: str | None = None       # "anthropic" | "openai"
+    llm_provider: str | None = None       # "anthropic" | "openai" | "deepseek" | "gemini"
     llm_model: str | None = None
-    anthropic_api_key: str | None = None  # written to .env, never stored in Supabase
+    daily_target: int | None = None       # questions per day chosen on the home slider
+    supabase_url: str | None = None       # written to .env like the keys below
+    supabase_service_key: str | None = None
+    anthropic_api_key: str | None = None  # keys are written to .env, never stored in Supabase
     openai_api_key: str | None = None
+    deepseek_api_key: str | None = None
+    gemini_api_key: str | None = None
     github_token: str | None = None
 
 
 @app.get("/api/settings")
 def get_settings():
+    # Settings stored in Supabase — fall back to defaults when the database
+    # isn't reachable yet, so the Settings page can load and be used to paste
+    # the Supabase credentials in the first place.
+    stored = {
+        "github_repo_url": "",
+        "llm_provider": "anthropic",
+        "llm_model": "",
+        "daily_target": 1,
+    }
+    supabase_error = None
+    if db_mod.is_configured():
+        try:
+            stored = {
+                "github_repo_url": get_setting("github_repo_url"),
+                "llm_provider": get_setting("llm_provider", "anthropic"),
+                "llm_model": get_setting("llm_model"),
+                "daily_target": int(get_setting("daily_target", "1") or "1"),
+            }
+        except Exception as exc:
+            supabase_error = f"Supabase is configured but unreachable: {exc}"
     return {
-        "github_repo_url": get_setting("github_repo_url"),
-        "llm_provider": get_setting("llm_provider", "anthropic"),
-        "llm_model": get_setting("llm_model"),
+        **stored,
         "default_models": llm.DEFAULT_MODELS,
-        # Secrets are only reported masked so the UI can show "already set".
+        "supabase_configured": db_mod.is_configured(),
+        "supabase_error": supabase_error,
+        # The URL isn't a secret; the service key is only reported masked,
+        # like every other secret, so the UI can show "already set".
+        "supabase_url": config.get_env("SUPABASE_URL"),
+        "supabase_service_key_masked": config.mask_secret(config.get_env("SUPABASE_SERVICE_KEY")),
         "anthropic_api_key_masked": config.mask_secret(config.get_env("ANTHROPIC_API_KEY")),
         "openai_api_key_masked": config.mask_secret(config.get_env("OPENAI_API_KEY")),
+        "deepseek_api_key_masked": config.mask_secret(config.get_env("DEEPSEEK_API_KEY")),
+        "gemini_api_key_masked": config.mask_secret(config.get_env("GEMINI_API_KEY")),
         "github_token_masked": config.mask_secret(config.get_env("GITHUB_TOKEN")),
     }
 
 
 @app.put("/api/settings")
 def update_settings(body: SettingsUpdate):
-    if body.github_repo_url is not None:
-        set_setting("github_repo_url", body.github_repo_url.strip())
-    if body.llm_provider is not None:
-        if body.llm_provider not in ("anthropic", "openai"):
-            raise HTTPException(status_code=400, detail="llm_provider must be 'anthropic' or 'openai'.")
-        set_setting("llm_provider", body.llm_provider)
-    if body.llm_model is not None:
-        set_setting("llm_model", body.llm_model.strip())
+    # 1. .env-backed values first — these must work before Supabase is set up.
+    if body.supabase_url is not None:
+        url = db_mod.normalize_url(body.supabase_url)
+        if url and not url.startswith("http"):
+            raise HTTPException(status_code=400, detail="supabase_url must be an https URL.")
+        config.set_env_var("SUPABASE_URL", url)
+    if body.supabase_service_key:
+        config.set_env_var("SUPABASE_SERVICE_KEY", body.supabase_service_key)
+    if body.supabase_url is not None or body.supabase_service_key:
+        db_mod.reset_client()  # pick up new credentials without a restart
     if body.anthropic_api_key:
         config.set_env_var("ANTHROPIC_API_KEY", body.anthropic_api_key)
     if body.openai_api_key:
         config.set_env_var("OPENAI_API_KEY", body.openai_api_key)
+    if body.deepseek_api_key:
+        config.set_env_var("DEEPSEEK_API_KEY", body.deepseek_api_key)
+    if body.gemini_api_key:
+        config.set_env_var("GEMINI_API_KEY", body.gemini_api_key)
     if body.github_token:
         config.set_env_var("GITHUB_TOKEN", body.github_token)
+
+    # 2. Values stored in the Supabase settings table. If Supabase still isn't
+    # configured, skip these instead of failing the save — the .env values
+    # above were persisted, and the UI shows a "configure Supabase" banner.
+    if not db_mod.is_configured():
+        return get_settings()
+
+    if body.github_repo_url is not None:
+        set_setting("github_repo_url", body.github_repo_url.strip())
+    if body.llm_provider is not None:
+        if body.llm_provider not in llm.DEFAULT_MODELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"llm_provider must be one of: {', '.join(llm.DEFAULT_MODELS)}.",
+            )
+        set_setting("llm_provider", body.llm_provider)
+    if body.llm_model is not None:
+        set_setting("llm_model", body.llm_model.strip())
+    if body.daily_target is not None:
+        if not 1 <= body.daily_target <= 37:
+            raise HTTPException(status_code=400, detail="daily_target must be between 1 and 37.")
+        set_setting("daily_target", str(body.daily_target))
     return get_settings()
 
 

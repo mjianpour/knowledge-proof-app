@@ -43,8 +43,13 @@ Fill in:
 |---|---|
 | `SUPABASE_URL` | Project URL from step 2 |
 | `SUPABASE_SERVICE_KEY` | `service_role` key from step 2 |
-| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | At least the provider you'll select in Settings (can also be pasted on the Settings page later) |
+| `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API keys (default model: `claude-opus-4-8`) |
+| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) (default model: `gpt-5.1`) |
+| `DEEPSEEK_API_KEY` | [platform.deepseek.com](https://platform.deepseek.com) → API keys (models: `deepseek-chat`, `deepseek-reasoner`) |
+| `GEMINI_API_KEY` | [Google AI Studio](https://aistudio.google.com/apikey) → Get API key (models: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`) |
 | `GITHUB_TOKEN` | Personal access token with read access to your Obsidian vault repo (needed for private repos) |
+
+Only the key for the provider you select in Settings is required — all keys can also be pasted on the Settings page later (they're written to `.env`, never to Supabase).
 
 ### 4. Python dependencies + CLI
 
@@ -83,12 +88,12 @@ Notes:
 ## Using the app
 
 1. **Settings** (gear icon):
-   - Pick the LLM provider (Anthropic / OpenAI) and optionally paste the API key — it's written to `.env`.
+   - Pick the LLM provider (Anthropic / OpenAI / DeepSeek / Google Gemini) and optionally paste the API key — it's written to `.env`. The model field is optional (sensible per-provider defaults). Native PDF distillation is available on Anthropic and Gemini; DeepSeek and OpenAI fall back to locally-extracted text.
    - Set your Obsidian vault's GitHub repo URL and hit **Sync vault now**. Top-level vault folders are matched to topics by name (case-insensitive), so a `Quantum Mechanics/` folder feeds the Quantum Mechanics topic.
    - For each topic, set the **reference book** as a citation string (e.g. *"Electrodynamics, Reitz & Milford, 2nd ed., ch. 13"*) — famous books don't need uploading; the LLM is told you study from them.
    - For niche/small PDFs, use the upload icon on a topic: the backend extracts the text **and runs a one-time LLM distillation pass** over the file (sent natively to Anthropic when selected, otherwise via extracted text). The digest is reused for every future challenge.
-2. **Today's Challenge** on the home page: the scheduler picks the most overdue topic, the LLM writes one conceptual problem from your material, you answer in free text, and the LLM grades it with feedback — flagging when you patched the symptom without understanding the mechanism.
-3. **Scheduler**: every topic starts daily. Score > 75 doubles the review interval (capped at 30 days); ≤ 75 resets it to 1 day. You can do multiple challenges per day — the button keeps serving the next most-overdue topic.
+2. **Today's Challenge** on the home page: pick how many questions you want today with the **Questions today** slider (1–37, remembered across sessions), then the scheduler picks the most overdue topic, the LLM writes one conceptual problem from your material, you answer in free text, and the LLM grades it with feedback — flagging when you patched the symptom without understanding the mechanism. With more than one question, the session walks you through them in sequence with a progress counter.
+3. **Scheduler**: every topic starts daily. Score > 75 doubles the review interval (capped at 30 days); ≤ 75 resets it to 1 day. In a multi-question session, topics already challenged today are skipped until every topic has had one (then it cycles back); ties between equally-overdue topics go to the least-recently-challenged one.
 4. **Heatmap**: bottom of the home page, GitHub-style, past 12 months. Intensity = challenges completed that day; hover a square for the date and topics.
 
 ## Project layout
@@ -103,7 +108,7 @@ supabase/schema.sql  run once in the Supabase SQL editor
 
 ## Troubleshooting
 
-- **"Supabase is not configured"** — fill `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` in `.env`, then `knowledge stop && knowledge run`.
+- **"Supabase is not configured"** — paste the project URL and `service_role` key in the Settings page's Supabase section (or fill them in `.env`). No restart needed when set via Settings. Any URL form from the dashboard works — a pasted `.../rest/v1/` suffix is normalized automatically.
 - **"ANTHROPIC_API_KEY is not set"** — paste the key on the Settings page (or in `.env`) for the provider you selected.
 - **GitHub sync 404** — private repo without a valid `GITHUB_TOKEN`, or a wrong repo URL.
 - **PDF upload fails with "no extractable text"** — the PDF is a pure image scan; pypdf can't read it.

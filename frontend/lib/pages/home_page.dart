@@ -15,6 +15,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   Map<String, Map<String, dynamic>> _dayData = {};
   int _totalChallenges = 0;
+  int _dailyTarget = 1;
   String? _error;
   bool _loading = true;
 
@@ -22,6 +23,25 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _loadHeatmap();
+    _loadDailyTarget();
+  }
+
+  Future<void> _loadDailyTarget() async {
+    try {
+      final settings = await Api.getSettings();
+      final target = settings['daily_target'] as int? ?? 1;
+      setState(() => _dailyTarget = target.clamp(1, 37));
+    } catch (_) {
+      // Backend not configured yet — keep the default of 1.
+    }
+  }
+
+  Future<void> _saveDailyTarget(int value) async {
+    try {
+      await Api.updateSettings({'daily_target': value});
+    } catch (_) {
+      // Non-fatal: the session still uses the slider value locally.
+    }
   }
 
   Future<void> _loadHeatmap() async {
@@ -50,8 +70,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openChallenge() async {
-    await Navigator.of(context)
-        .push(MaterialPageRoute(builder: (_) => const ChallengePage()));
+    final target = _dailyTarget; // read live at click time
+    await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => ChallengePage(target: target)));
     _loadHeatmap(); // refresh the heatmap after completing challenges
   }
 
@@ -84,17 +105,44 @@ class _HomePageState extends State<HomePage> {
                 const Spacer(),
                 FilledButton.icon(
                   onPressed: _openChallenge,
-                  icon: const Icon(Icons.psychology, size: 36),
-                  label: const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 28, horizontal: 16),
-                    child: Text("Today's Challenge",
-                        style: TextStyle(fontSize: 28)),
-                  ),
+                  icon: const Icon(Icons.psychology),
+                  label: const Text("Today's Challenge"),
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'One deep conceptual problem per day, from your own notes and books.',
+                  _dailyTarget == 1
+                      ? 'One deep conceptual problem per day, from your own notes and books.'
+                      : '$_dailyTarget deep conceptual problems today, from your own notes and books.',
                   style: Theme.of(context).textTheme.bodyMedium,
+                ),
+                const SizedBox(height: 20),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 520),
+                  child: Row(
+                    children: [
+                      Text('Questions today',
+                          style: Theme.of(context).textTheme.labelLarge),
+                      Expanded(
+                        child: Slider(
+                          value: _dailyTarget.toDouble(),
+                          min: 1,
+                          max: 37,
+                          divisions: 36,
+                          label: '$_dailyTarget',
+                          onChanged: (value) =>
+                              setState(() => _dailyTarget = value.round()),
+                          onChangeEnd: (value) =>
+                              _saveDailyTarget(value.round()),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 28,
+                        child: Text('$_dailyTarget',
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context).textTheme.titleMedium),
+                      ),
+                    ],
+                  ),
                 ),
                 const Spacer(),
                 Align(

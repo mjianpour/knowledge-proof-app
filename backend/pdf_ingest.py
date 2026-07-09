@@ -3,9 +3,9 @@
 Per the user's design, uploaded PDFs are small niche documents. Each upload:
 1. Extracts text server-side with pypdf and stores it as raw chunks.
 2. Runs ONE LLM pass over the file to produce a study digest — the PDF is sent
-   natively when the provider supports file input (Anthropic); otherwise the
-   locally-extracted text is sent instead. The digest is stored alongside the
-   chunks and reused for every future challenge (no per-challenge re-reading).
+   natively when the provider supports file input (Anthropic, Gemini);
+   otherwise the locally-extracted text is sent instead. The digest is stored
+   alongside the chunks and reused for every future challenge.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from backend import llm
 from backend.db import db
 
 CHUNK_CHARS = 6000
-NATIVE_PDF_MAX_BYTES = 25 * 1024 * 1024  # stay under the 32 MB request limit after base64
 
 DIGEST_PROMPT = """This PDF is niche study material for the topic "{topic}". Produce a study digest that a tutor can later use to write deep conceptual questions. Include:
 1. The core concepts and mechanisms covered (with the key equations/definitions).
@@ -58,7 +57,7 @@ def ingest(topic_id: str, filename: str, pdf_bytes: bytes) -> dict:
 
     # One-time LLM distillation: native file input if supported, else the extracted text.
     prompt = DIGEST_PROMPT.format(topic=topic_name)
-    if llm.supports_native_pdf() and len(pdf_bytes) <= NATIVE_PDF_MAX_BYTES:
+    if 0 < len(pdf_bytes) <= llm.native_pdf_limit():
         digest = llm.digest_pdf_native(pdf_bytes, prompt)
         digest_source = "native-pdf"
     else:

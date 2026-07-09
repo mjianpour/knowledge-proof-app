@@ -109,12 +109,27 @@ Rules for the challenge you produce:
 - The problem must require explaining a mechanism, predicting behavior from first principles, or finding and explaining a subtle error. A great format: a plausible-looking code snippet, derivation, or argument that contains one subtle conceptual bug the student must find AND explain.
 - Ground the problem in the student's own material when provided (their notes, book, PDF digests) so it feels personal, but do not require material they haven't seen.
 - Target roughly 5-15 minutes of hard thinking for someone who studied the material.
-- Output ONLY the challenge itself (you may use markdown, code blocks, or short derivations). No preamble, no greeting, no answer, no hints section."""
+- Output ONLY the challenge itself. No preamble, no greeting, no answer, no hints section.
+
+Formatting rules (the client renders GitHub-flavored markdown with LaTeX):
+- All code goes in fenced code blocks with a language tag (```dart, ```python, ...).
+- All mathematics goes in LaTeX: $...$ inline, $$...$$ for display equations. Never write plain-text formulas like p^2/2m or hbar — write $\\frac{p^2}{2m}$ and $\\hbar$.
+- Use markdown structure (short paragraphs, lists) where it helps readability."""
+
+
+def _answered_today(today: str) -> int:
+    rows = (
+        db().table("challenges")
+        .select("id")
+        .eq("status", "answered")
+        .eq("challenge_date", today)
+        .execute()
+        .data
+    )
+    return len(rows)
 
 
 def generate_challenge() -> dict:
-    topic = scheduler.pick_topic()
-
     # Resume today's unanswered challenge instead of generating a duplicate.
     today = date.today().isoformat()
     pending = (
@@ -134,8 +149,10 @@ def generate_challenge() -> dict:
             "topic": topic_row[0]["name"] if topic_row else "?",
             "question": challenge["question"],
             "resumed": True,
+            "answered_today": _answered_today(today),
         }
 
+    topic = scheduler.pick_topic()
     context = build_context(topic)
     user_prompt = (
         f"Topic for today's challenge: {topic['name']}\n\n"
@@ -157,7 +174,13 @@ def generate_challenge() -> dict:
         .execute()
         .data[0]
     )
-    return {"id": row["id"], "topic": topic["name"], "question": question, "resumed": False}
+    return {
+        "id": row["id"],
+        "topic": topic["name"],
+        "question": question,
+        "resumed": False,
+        "answered_today": _answered_today(today),
+    }
 
 
 EVALUATION_SYSTEM = """You are grading a student's free-text answer to a conceptual challenge.
@@ -167,6 +190,7 @@ Grade on understanding of the underlying mechanism, not on polish:
 - Specifically detect "symptom patching": the student fixes the surface problem (e.g. changes the buggy line, cites the right formula) without demonstrating they understand the underlying mechanism. If so, cap the score at 60 and explain what mechanism they missed.
 - Partial credit for partially correct reasoning; be concrete about which step of their reasoning failed.
 - Feedback should teach: state the correct mechanism clearly and briefly.
+- Format the feedback as GitHub-flavored markdown: code in fenced blocks with a language tag, all mathematics in LaTeX ($...$ inline, $$...$$ display) — never plain-text formulas.
 Return the structured result."""
 
 
@@ -219,4 +243,5 @@ def evaluate_answer(challenge_id: str, answer: str) -> dict:
         "topic": topic_name,
         "next_review_date": schedule["next_review_date"],
         "interval_days": schedule["interval_days"],
+        "answered_today": _answered_today(date.today().isoformat()),
     }

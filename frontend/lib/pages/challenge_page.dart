@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../widgets/rich_content.dart';
 
 class ChallengePage extends StatefulWidget {
-  const ChallengePage({super.key});
+  const ChallengePage({super.key, this.target = 1});
+
+  /// How many questions the user chose for today's session (home page slider).
+  final int target;
 
   @override
   State<ChallengePage> createState() => _ChallengePageState();
@@ -17,6 +21,7 @@ class _ChallengePageState extends State<ChallengePage> {
   String? _error;
   bool _loading = true;
   bool _submitting = false;
+  int _answeredToday = 0; // reported by the backend, survives reloads
 
   @override
   void initState() {
@@ -41,6 +46,7 @@ class _ChallengePageState extends State<ChallengePage> {
       final challenge = await Api.todaysChallenge();
       setState(() {
         _challenge = challenge;
+        _answeredToday = challenge['answered_today'] as int? ?? _answeredToday;
         _loading = false;
       });
     } catch (e) {
@@ -60,6 +66,7 @@ class _ChallengePageState extends State<ChallengePage> {
           await Api.answerChallenge(_challenge!['id'] as String, answer);
       setState(() {
         _evaluation = result;
+        _answeredToday = result['answered_today'] as int? ?? _answeredToday + 1;
         _submitting = false;
       });
     } catch (e) {
@@ -73,8 +80,11 @@ class _ChallengePageState extends State<ChallengePage> {
 
   @override
   Widget build(BuildContext context) {
+    final title = widget.target > 1
+        ? "Today's Challenges ($_answeredToday of ${widget.target} done)"
+        : "Today's Challenge";
     return Scaffold(
-      appBar: AppBar(title: const Text("Today's Challenge")),
+      appBar: AppBar(title: Text(title)),
       body: Center(
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 800),
@@ -122,6 +132,14 @@ class _ChallengePageState extends State<ChallengePage> {
               avatar: const Icon(Icons.school, size: 18),
               label: Text(challenge['topic'] as String? ?? '?'),
             ),
+            if (widget.target > 1 && _evaluation == null) ...[
+              const SizedBox(width: 8),
+              Chip(
+                avatar: const Icon(Icons.format_list_numbered, size: 18),
+                label:
+                    Text('Question ${_answeredToday + 1} of ${widget.target}'),
+              ),
+            ],
             if (challenge['resumed'] == true) ...[
               const SizedBox(width: 8),
               const Chip(label: Text('resumed from earlier today')),
@@ -132,10 +150,7 @@ class _ChallengePageState extends State<ChallengePage> {
         Card(
           child: Padding(
             padding: const EdgeInsets.all(20),
-            child: SelectableText(
-              challenge['question'] as String? ?? '',
-              style: const TextStyle(fontSize: 16, height: 1.5),
-            ),
+            child: RichContent(challenge['question'] as String? ?? ''),
           ),
         ),
         const SizedBox(height: 24),
@@ -211,8 +226,7 @@ class _ChallengePageState extends State<ChallengePage> {
                 Text('Feedback',
                     style: Theme.of(context).textTheme.titleMedium),
                 const SizedBox(height: 8),
-                SelectableText(eval['feedback'] as String? ?? '',
-                    style: const TextStyle(height: 1.5)),
+                RichContent(eval['feedback'] as String? ?? '', fontSize: 15),
               ],
             ),
           ),
@@ -235,27 +249,69 @@ class _ChallengePageState extends State<ChallengePage> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  SelectableText(symptomNote,
-                      style: const TextStyle(height: 1.5)),
+                  RichContent(symptomNote, fontSize: 15),
                 ],
               ),
             ),
           ),
         ],
         const SizedBox(height: 24),
+        _sessionFooter(context),
+      ],
+    );
+  }
+
+  /// Post-evaluation actions: keep driving toward the daily target, then
+  /// celebrate and offer extras beyond it (multiple per day is allowed).
+  Widget _sessionFooter(BuildContext context) {
+    final remaining = widget.target - _answeredToday;
+    if (remaining > 0) {
+      return Column(
+        children: [
+          Text('$_answeredToday of ${widget.target} done — $remaining to go',
+              style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).pop(),
+                icon: const Icon(Icons.home),
+                label: const Text('Stop for now'),
+              ),
+              const SizedBox(width: 16),
+              FilledButton.icon(
+                onPressed: _fetchChallenge,
+                icon: const Icon(Icons.arrow_forward),
+                label: Text('Next challenge (${_answeredToday + 1} of ${widget.target})'),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+    return Column(
+      children: [
+        Text(
+          widget.target > 1
+              ? '🎉 Session complete — ${widget.target} challenges done today!'
+              : 'Done for today!',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             OutlinedButton.icon(
               onPressed: () => Navigator.of(context).pop(),
               icon: const Icon(Icons.home),
-              label: const Text('Done for now'),
+              label: const Text('Back home'),
             ),
             const SizedBox(width: 16),
-            FilledButton.icon(
+            FilledButton.tonalIcon(
               onPressed: _fetchChallenge,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Another challenge'),
+              icon: const Icon(Icons.add),
+              label: const Text('One more anyway'),
             ),
           ],
         ),

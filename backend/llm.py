@@ -1,8 +1,15 @@
-"""LLM provider routing (Anthropic / OpenAI).
+"""LLM provider routing (Anthropic / OpenAI / DeepSeek / Gemini).
 
 The provider and model are stored in the Supabase settings table; API keys are
 read from .env only. All calls go through this module so the rest of the
 backend is provider-agnostic.
+
+Provider notes:
+- DeepSeek is OpenAI-compatible: the OpenAI client pointed at api.deepseek.com.
+  deepseek-reasoner rejects response_format, so JSON is prompt-instructed and
+  parsed robustly instead of schema-enforced.
+- Gemini uses the native google-genai SDK (successor to google-generativeai)
+  and, like Anthropic, supports native PDF input for the distillation pass.
 """
 
 from __future__ import annotations
@@ -19,6 +26,26 @@ from backend.db import get_setting
 DEFAULT_MODELS = {
     "anthropic": "claude-opus-4-8",
     "openai": "gpt-5.1",
+    "deepseek": "deepseek-chat",
+    "gemini": "gemini-2.5-flash",
+}
+
+PROVIDER_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+# Providers that can ingest a PDF file directly for the one-time distillation
+# pass, with a size cap that keeps the request under each API's limit
+# (Anthropic: 32 MB request; Gemini: 20 MB inline request), leaving headroom
+# for base64 overhead.
+NATIVE_PDF_LIMITS = {
+    "anthropic": 25 * 1024 * 1024,
+    "gemini": 14 * 1024 * 1024,
 }
 
 
@@ -29,13 +56,20 @@ def provider_config() -> tuple[str, str]:
         provider = "anthropic"
     model = get_setting("llm_model", "") or DEFAULT_MODELS[provider]
 
-    key_name = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+    key_name = PROVIDER_KEY_ENV[provider]
     if not config.get_env(key_name):
         raise HTTPException(
             status_code=503,
             detail=f"{key_name} is not set. Add it on the Settings page (or in .env).",
         )
     return provider, model
+
+
+def _schema_instruction(schema: dict) -> str:
+    return (
+        "\n\nRespond with ONLY a single JSON object (no prose, no code fence) "
+        f"that conforms exactly to this JSON schema:\n{json.dumps(schema)}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -70,44 +104,89 @@ def _anthropic_generate(model: str, system: str, content, max_tokens: int,
 
 
 # ---------------------------------------------------------------------------
-# OpenAI
+# OpenAI-compatible (OpenAI, DeepSeek)
 # ---------------------------------------------------------------------------
 
-def _openai_client():
+def _openai_compat_generate(provider: str, model: str, system: str, user_text: str,
+                            max_tokens: int, schema: dict | None = None) -> str:
     from openai import OpenAI
 
-    return OpenAI(api_key=config.get_env("OPENAI_API_KEY"))
+    if provider == "deepseek":
+        client = OpenAI(api_key=config.get_env("DEEPSEEK_API_KEY"), base_url=DEEPSEEK_BASE_URL)
+    else:
+        client = OpenAI(api_key=config.get_env("OPENAI_API_KEY"))
+
+    kwargs: dict = {"model": model}
+    if provider == "deepseek":
+        # DeepSeek still uses max_tokens, and deepseek-reasoner rejects
+        # response_format entirely — instruct JSON in the prompt instead.
+        kwargs["max_tokens"] = max_tokens
+        if schema is not None:
+            user_text += _schema_instruction(schema)
+    else:
+        kwargs["max_completion_tokens"] = max_tokens
+        if schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "result", "schema": schema, "strict": True},
+            }
+
+    kwargs["messages"] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_text},
+    ]
+    response = client.chat.completions.create(**kwargs)
+    return response.choices[0].message.content or ""
 
 
-def _openai_generate(model: str, system: str, user_text: str, max_tokens: int,
+# ---------------------------------------------------------------------------
+# Gemini (native google-genai SDK)
+# ---------------------------------------------------------------------------
+
+def _gemini_generate(model: str, system: str, contents, max_tokens: int,
                      schema: dict | None = None) -> str:
-    kwargs: dict = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_text},
-        ],
-        "max_completion_tokens": max_tokens,
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=config.get_env("GEMINI_API_KEY"))
+    config_kwargs: dict = {
+        "system_instruction": system,
+        "max_output_tokens": max_tokens,
     }
     if schema is not None:
-        kwargs["response_format"] = {
-            "type": "json_schema",
-            "json_schema": {"name": "result", "schema": schema, "strict": True},
-        }
-    response = _openai_client().chat.completions.create(**kwargs)
-    return response.choices[0].message.content or ""
+        # Gemini's response_schema uses its own schema dialect; JSON mode plus
+        # a prompt-embedded schema is portable and parsed robustly downstream.
+        config_kwargs["response_mime_type"] = "application/json"
+        if isinstance(contents, str):
+            contents = contents + _schema_instruction(schema)
+        elif isinstance(contents, list):
+            contents = [*contents, _schema_instruction(schema)]
+
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(**config_kwargs),
+    )
+    return response.text or ""
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+def _dispatch(provider: str, model: str, system: str, user_text: str,
+              max_tokens: int, schema: dict | None) -> str:
+    if provider == "anthropic":
+        return _anthropic_generate(model, system, user_text, max_tokens, schema=schema)
+    if provider == "gemini":
+        return _gemini_generate(model, system, user_text, max_tokens, schema=schema)
+    return _openai_compat_generate(provider, model, system, user_text, max_tokens, schema=schema)
+
+
 def generate_text(system: str, user_text: str, max_tokens: int = 4096) -> str:
     provider, model = provider_config()
     try:
-        if provider == "anthropic":
-            return _anthropic_generate(model, system, user_text, max_tokens)
-        return _openai_generate(model, system, user_text, max_tokens)
+        return _dispatch(provider, model, system, user_text, max_tokens, None)
     except HTTPException:
         raise
     except Exception as exc:  # surface provider errors to the UI with context
@@ -117,10 +196,7 @@ def generate_text(system: str, user_text: str, max_tokens: int = 4096) -> str:
 def generate_json(system: str, user_text: str, schema: dict, max_tokens: int = 4096) -> dict:
     provider, model = provider_config()
     try:
-        if provider == "anthropic":
-            raw = _anthropic_generate(model, system, user_text, max_tokens, schema=schema)
-        else:
-            raw = _openai_generate(model, system, user_text, max_tokens, schema=schema)
+        raw = _dispatch(provider, model, system, user_text, max_tokens, schema)
         return _parse_json(raw)
     except HTTPException:
         raise
@@ -129,6 +205,9 @@ def generate_json(system: str, user_text: str, schema: dict, max_tokens: int = 4
 
 
 def _parse_json(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):  # tolerate fenced output from prompt-instructed JSON
+        raw = re.sub(r"^```[a-zA-Z]*\n?|```$", "", raw).strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -138,30 +217,42 @@ def _parse_json(raw: str) -> dict:
         raise
 
 
-def supports_native_pdf() -> bool:
+def native_pdf_limit() -> int:
+    """Max PDF size (bytes) the current provider accepts natively; 0 = unsupported."""
     provider, _ = provider_config()
-    return provider == "anthropic"
+    return NATIVE_PDF_LIMITS.get(provider, 0)
 
 
 def digest_pdf_native(pdf_bytes: bytes, prompt: str, max_tokens: int = 8192) -> str:
-    """One-time distillation pass: send the PDF file itself to the model (Anthropic only).
+    """One-time distillation pass: send the PDF file itself to the model.
 
-    Anthropic accepts base64 PDF document blocks directly; callers should fall
-    back to text extraction + generate_text() for other providers or oversized
-    files (32 MB request limit).
+    Supported for Anthropic (base64 document block) and Gemini (inline bytes
+    part). Callers fall back to text extraction + generate_text() for other
+    providers or oversized files.
     """
-    _, model = provider_config()
-    data = base64.standard_b64encode(pdf_bytes).decode("utf-8")
-    content = [
-        {
-            "type": "document",
-            "source": {"type": "base64", "media_type": "application/pdf", "data": data},
-        },
-        {"type": "text", "text": prompt},
-    ]
+    provider, model = provider_config()
+    system = "You are a precise study-material analyst."
     try:
-        return _anthropic_generate(model, "You are a precise study-material analyst.", content, max_tokens)
+        if provider == "anthropic":
+            data = base64.standard_b64encode(pdf_bytes).decode("utf-8")
+            content = [
+                {
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": data},
+                },
+                {"type": "text", "text": prompt},
+            ]
+            return _anthropic_generate(model, system, content, max_tokens)
+        if provider == "gemini":
+            from google.genai import types
+
+            contents = [
+                types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf"),
+                prompt,
+            ]
+            return _gemini_generate(model, system, contents, max_tokens)
+        raise HTTPException(status_code=400, detail=f"{provider} does not support native PDF input.")
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"PDF digestion failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"PDF digestion failed ({provider}/{model}): {exc}")

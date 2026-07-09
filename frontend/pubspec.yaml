@@ -12,6 +12,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.2.0
   file_picker: ^8.1.2
+  gpt_markdown: ^1.1.0
+  google_fonts: ^6.2.1
 
 dev_dependencies:
   flutter_test:

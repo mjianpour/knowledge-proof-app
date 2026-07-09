@@ -1,9 +1,103 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'pages/home_page.dart';
 
 void main() {
   runApp(const DeepDiveTrackerApp());
+}
+
+/// Shared corner radius for cards, inputs, and buttons so the question box
+/// and the answer field match exactly.
+const double kCornerRadius = 14;
+
+ThemeData _buildTheme(Brightness brightness) {
+  final isDark = brightness == Brightness.dark;
+
+  // Claude-inspired scientific palette: warm cream paper, ink text,
+  // terracotta accent.
+  const terracotta = Color(0xFFB4552D);
+  const terracottaDark = Color(0xFFD97757);
+  final scheme = ColorScheme.fromSeed(
+    seedColor: terracotta,
+    brightness: brightness,
+  ).copyWith(
+    primary: isDark ? terracottaDark : terracotta,
+    surface: isDark ? const Color(0xFF2B2A27) : const Color(0xFFFBF9F3),
+    surfaceContainerHighest:
+        isDark ? const Color(0xFF3A3833) : const Color(0xFFEFE9DC),
+    outlineVariant: isDark ? const Color(0xFF4A4740) : const Color(0xFFDDD5C4),
+    onSurface: isDark ? const Color(0xFFE8E4D9) : const Color(0xFF35311F),
+  );
+
+  final baseText = isDark ? ThemeData.dark().textTheme : ThemeData.light().textTheme;
+  final textTheme = GoogleFonts.libreBaskervilleTextTheme(baseText).apply(
+    bodyColor: scheme.onSurface,
+    displayColor: scheme.onSurface,
+  );
+
+  final shape = RoundedRectangleBorder(
+    borderRadius: BorderRadius.circular(kCornerRadius),
+  );
+
+  return ThemeData(
+    useMaterial3: true,
+    colorScheme: scheme,
+    textTheme: textTheme,
+    scaffoldBackgroundColor:
+        isDark ? const Color(0xFF262521) : const Color(0xFFF4F0E5),
+    appBarTheme: AppBarTheme(
+      backgroundColor: isDark ? const Color(0xFF262521) : const Color(0xFFF4F0E5),
+      foregroundColor: scheme.onSurface,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      centerTitle: false,
+      titleTextStyle: textTheme.titleLarge,
+    ),
+    cardTheme: CardThemeData(
+      elevation: 0,
+      color: scheme.surface,
+      shape: shape.copyWith(side: BorderSide(color: scheme.outlineVariant)),
+      margin: EdgeInsets.zero,
+    ),
+    inputDecorationTheme: InputDecorationTheme(
+      filled: true,
+      fillColor: scheme.surface,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(kCornerRadius),
+        borderSide: BorderSide(color: scheme.outlineVariant),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(kCornerRadius),
+        borderSide: BorderSide(color: scheme.outlineVariant),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(kCornerRadius),
+        borderSide: BorderSide(color: scheme.primary, width: 1.5),
+      ),
+    ),
+    filledButtonTheme: FilledButtonThemeData(
+      style: FilledButton.styleFrom(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(kCornerRadius - 4),
+        ),
+      ),
+    ),
+    outlinedButtonTheme: OutlinedButtonThemeData(
+      style: OutlinedButton.styleFrom(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(kCornerRadius - 4),
+        ),
+        side: BorderSide(color: scheme.outlineVariant),
+      ),
+    ),
+    chipTheme: ChipThemeData(
+      backgroundColor: scheme.surfaceContainerHighest,
+      side: BorderSide(color: scheme.outlineVariant),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    ),
+    dialogTheme: DialogThemeData(shape: shape, backgroundColor: scheme.surface),
+  );
 }
 
 class DeepDiveTrackerApp extends StatelessWidget {
@@ -14,15 +108,8 @@ class DeepDiveTrackerApp extends StatelessWidget {
     return MaterialApp(
       title: 'Deep Dive Tracker',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.indigo, brightness: Brightness.dark),
-        useMaterial3: true,
-      ),
+      theme: _buildTheme(Brightness.light),
+      darkTheme: _buildTheme(Brightness.dark),
       home: const HomePage(),
     );
   }

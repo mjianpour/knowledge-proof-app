@@ -11,10 +11,14 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  final _supabaseUrlController = TextEditingController();
+  final _supabaseKeyController = TextEditingController();
   final _repoController = TextEditingController();
   final _modelController = TextEditingController();
   final _anthropicKeyController = TextEditingController();
   final _openaiKeyController = TextEditingController();
+  final _deepseekKeyController = TextEditingController();
+  final _geminiKeyController = TextEditingController();
   final _githubTokenController = TextEditingController();
 
   String _provider = 'anthropic';
@@ -32,10 +36,14 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   void dispose() {
+    _supabaseUrlController.dispose();
+    _supabaseKeyController.dispose();
     _repoController.dispose();
     _modelController.dispose();
     _anthropicKeyController.dispose();
     _openaiKeyController.dispose();
+    _deepseekKeyController.dispose();
+    _geminiKeyController.dispose();
     _githubTokenController.dispose();
     super.dispose();
   }
@@ -50,11 +58,10 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _loading = true);
     try {
       final settings = await Api.getSettings();
-      final topics = await Api.listTopics();
       setState(() {
         _settings = settings;
-        _topics = topics;
         _provider = settings['llm_provider'] as String? ?? 'anthropic';
+        _supabaseUrlController.text = settings['supabase_url'] as String? ?? '';
         _repoController.text = settings['github_repo_url'] as String? ?? '';
         _modelController.text = settings['llm_model'] as String? ?? '';
         _loading = false;
@@ -62,6 +69,15 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       setState(() => _loading = false);
       _toast('Failed to load settings: $e');
+      return;
+    }
+    // Topics live in Supabase — load them separately so an unconfigured
+    // database doesn't block the page (you need it to paste the credentials).
+    try {
+      final topics = await Api.listTopics();
+      setState(() => _topics = topics);
+    } catch (_) {
+      setState(() => _topics = []);
     }
   }
 
@@ -72,13 +88,23 @@ class _SettingsPageState extends State<SettingsPage> {
         'github_repo_url': _repoController.text,
         'llm_provider': _provider,
         'llm_model': _modelController.text,
+        'supabase_url': _supabaseUrlController.text.trim(),
       };
       // Keys are write-only: only send when the user typed a new one.
+      if (_supabaseKeyController.text.trim().isNotEmpty) {
+        updates['supabase_service_key'] = _supabaseKeyController.text.trim();
+      }
       if (_anthropicKeyController.text.trim().isNotEmpty) {
         updates['anthropic_api_key'] = _anthropicKeyController.text.trim();
       }
       if (_openaiKeyController.text.trim().isNotEmpty) {
         updates['openai_api_key'] = _openaiKeyController.text.trim();
+      }
+      if (_deepseekKeyController.text.trim().isNotEmpty) {
+        updates['deepseek_api_key'] = _deepseekKeyController.text.trim();
+      }
+      if (_geminiKeyController.text.trim().isNotEmpty) {
+        updates['gemini_api_key'] = _geminiKeyController.text.trim();
       }
       if (_githubTokenController.text.trim().isNotEmpty) {
         updates['github_token'] = _githubTokenController.text.trim();
@@ -86,15 +112,20 @@ class _SettingsPageState extends State<SettingsPage> {
       final settings = await Api.updateSettings(updates);
       setState(() {
         _settings = settings;
+        _supabaseKeyController.clear();
         _anthropicKeyController.clear();
         _openaiKeyController.clear();
+        _deepseekKeyController.clear();
+        _geminiKeyController.clear();
         _githubTokenController.clear();
       });
       _toast('Settings saved.');
+      // Credentials may have just become valid — refresh topics/banner state.
+      await _load();
     } catch (e) {
       _toast('Save failed: $e');
     } finally {
-      setState(() => _saving = false);
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -273,6 +304,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 child: ListView(
                   padding: const EdgeInsets.all(24),
                   children: [
+                    if (_settings['supabase_configured'] == false ||
+                        _settings['supabase_error'] != null) ...[
+                      _supabaseBanner(),
+                      const SizedBox(height: 16),
+                    ],
+                    _sectionTitle('Supabase (database)'),
+                    _supabaseSection(),
+                    const SizedBox(height: 24),
                     _sectionTitle('LLM provider'),
                     _llmSection(),
                     const SizedBox(height: 24),
@@ -308,6 +347,62 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Widget _supabaseBanner() {
+    final error = _settings['supabase_error'] as String?;
+    final message = error ??
+        'Supabase is not configured yet. Paste your project URL and service_role '
+            'key below and hit Save — no restart needed. (Create a project at '
+            'supabase.com and run supabase/schema.sql in its SQL Editor first.)';
+    return Card(
+      color: Theme.of(context).colorScheme.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            const Icon(Icons.storage),
+            const SizedBox(width: 12),
+            Expanded(child: Text(message)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _supabaseSection() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: _supabaseUrlController,
+              decoration: const InputDecoration(
+                labelText: 'Supabase project URL',
+                hintText: 'https://your-project-ref.supabase.co',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _supabaseKeyController,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Supabase service_role key',
+                hintText: _maskHint(
+                    'supabase_service_key_masked', 'service_role key'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Both values are in the Supabase dashboard under Project Settings → API. '
+              'Use the service_role secret key (not anon). Stored only in the local .env.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _sectionTitle(String text) => Padding(
         padding: const EdgeInsets.only(bottom: 12),
         child:
@@ -336,6 +431,9 @@ class _SettingsPageState extends State<SettingsPage> {
                 DropdownMenuItem(
                     value: 'anthropic', child: Text('Anthropic (Claude)')),
                 DropdownMenuItem(value: 'openai', child: Text('OpenAI')),
+                DropdownMenuItem(value: 'deepseek', child: Text('DeepSeek')),
+                DropdownMenuItem(
+                    value: 'gemini', child: Text('Google Gemini (AI Studio)')),
               ],
               onChanged: (value) =>
                   setState(() => _provider = value ?? 'anthropic'),
@@ -364,6 +462,24 @@ class _SettingsPageState extends State<SettingsPage> {
               decoration: InputDecoration(
                 labelText: 'OpenAI API key',
                 hintText: _maskHint('openai_api_key_masked', 'OpenAI key'),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _deepseekKeyController,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'DeepSeek API key',
+                hintText: _maskHint('deepseek_api_key_masked', 'DeepSeek key'),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _geminiKeyController,
+              obscureText: true,
+              decoration: InputDecoration(
+                labelText: 'Gemini API key (Google AI Studio)',
+                hintText: _maskHint('gemini_api_key_masked', 'Gemini key'),
               ),
             ),
             const SizedBox(height: 8),
