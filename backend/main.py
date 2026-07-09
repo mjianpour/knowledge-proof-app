@@ -13,7 +13,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from backend import challenges, config, github_sync, llm, pdf_ingest
+from backend import challenges, config, github_sync, llm, pdf_ingest, progress
 from backend import db as db_mod
 from backend.db import db, get_setting, set_setting
 
@@ -37,6 +37,12 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/progress")
+def get_progress():
+    """Live progress log — the frontend polls this while a spinner is up."""
+    return progress.snapshot()
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +99,33 @@ def get_settings():
         "deepseek_api_key_masked": config.mask_secret(config.get_env("DEEPSEEK_API_KEY")),
         "gemini_api_key_masked": config.mask_secret(config.get_env("GEMINI_API_KEY")),
         "github_token_masked": config.mask_secret(config.get_env("GITHUB_TOKEN")),
+    }
+
+
+class DetectKeyBody(BaseModel):
+    api_key: str
+
+
+@app.post("/api/settings/detect-key")
+def detect_key(body: DetectKeyBody):
+    """Paste any LLM API key: identify the provider, store the key in .env,
+    and switch the active provider to it (with that provider's default model).
+    """
+    key = body.api_key.strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="No API key provided.")
+
+    with progress.task("Detecting which provider this API key belongs to"):
+        provider = llm.detect_provider(key)
+
+    config.set_env_var(llm.PROVIDER_KEY_ENV[provider], key)
+    if db_mod.is_configured():
+        set_setting("llm_provider", provider)
+        set_setting("llm_model", "")  # use the provider's default model
+    return {
+        "provider": provider,
+        "model": llm.DEFAULT_MODELS[provider],
+        "settings": get_settings(),
     }
 
 
@@ -245,6 +278,45 @@ def list_pdfs():
 
 class AnswerBody(BaseModel):
     answer: str
+
+
+class SessionBody(BaseModel):
+    count: int = 1
+    topic_ids: list[str] = []  # empty = automatic (all topics eligible)
+
+
+@app.post("/api/challenges/session")
+def start_session(body: SessionBody):
+    if not 1 <= body.count <= 37:
+        raise HTTPException(status_code=400, detail="count must be between 1 and 37.")
+    return challenges.generate_session(body.count, body.topic_ids)
+
+
+@app.get("/api/challenges")
+def list_challenges(limit: int = 300):
+    """Full challenge history (newest first) for the sidebar question list."""
+    rows = (
+        db().table("challenges")
+        .select("id, challenge_date, question, user_answer, evaluation, score, status, created_at, topics(name)")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+    )
+    return [
+        {
+            "id": r["id"],
+            "date": r["challenge_date"],
+            "topic": (r.get("topics") or {}).get("name", "?"),
+            "question": r["question"],
+            "user_answer": r["user_answer"],
+            "evaluation": r["evaluation"],
+            "score": r["score"],
+            "status": r["status"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
 
 
 @app.post("/api/challenges/today")

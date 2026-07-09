@@ -23,11 +23,16 @@ ThemeData _buildTheme(Brightness brightness) {
     brightness: brightness,
   ).copyWith(
     primary: isDark ? terracottaDark : terracotta,
-    surface: isDark ? const Color(0xFF2B2A27) : const Color(0xFFFBF9F3),
+    // Dark mode follows the Gemini dark theme neutrals (#131314 canvas,
+    // #1E1F20 surfaces); light mode keeps the warm paper palette.
+    surface: isDark ? const Color(0xFF1E1F20) : const Color(0xFFFBF9F3),
     surfaceContainerHighest:
-        isDark ? const Color(0xFF3A3833) : const Color(0xFFEFE9DC),
-    outlineVariant: isDark ? const Color(0xFF4A4740) : const Color(0xFFDDD5C4),
-    onSurface: isDark ? const Color(0xFFE8E4D9) : const Color(0xFF35311F),
+        isDark ? const Color(0xFF282A2C) : const Color(0xFFEFE9DC),
+    outlineVariant: isDark ? const Color(0xFF3C4043) : const Color(0xFFDDD5C4),
+    onSurface: isDark ? const Color(0xFFE3E3E3) : const Color(0xFF35311F),
+    // Labels on the orange (primary) buttons use the app background color so
+    // they stand out against the terracotta fill.
+    onPrimary: isDark ? const Color(0xFF131314) : const Color(0xFFF4F0E5),
   );
 
   final baseText = isDark ? ThemeData.dark().textTheme : ThemeData.light().textTheme;
@@ -45,9 +50,9 @@ ThemeData _buildTheme(Brightness brightness) {
     colorScheme: scheme,
     textTheme: textTheme,
     scaffoldBackgroundColor:
-        isDark ? const Color(0xFF262521) : const Color(0xFFF4F0E5),
+        isDark ? const Color(0xFF131314) : const Color(0xFFF4F0E5),
     appBarTheme: AppBarTheme(
-      backgroundColor: isDark ? const Color(0xFF262521) : const Color(0xFFF4F0E5),
+      backgroundColor: isDark ? const Color(0xFF131314) : const Color(0xFFF4F0E5),
       foregroundColor: scheme.onSurface,
       elevation: 0,
       scrolledUnderElevation: 0,

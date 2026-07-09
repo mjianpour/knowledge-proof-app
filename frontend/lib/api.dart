@@ -68,6 +68,14 @@ class Api {
   }
 
   // Challenges
+  static Future<List<dynamic>> listChallenges() async =>
+      (await _get('/challenges')) as List<dynamic>;
+
+  static Future<Map<String, dynamic>> startSession(
+          int count, List<String> topicIds) async =>
+      (await _send('POST', '/challenges/session',
+          {'count': count, 'topic_ids': topicIds})) as Map<String, dynamic>;
+
   static Future<Map<String, dynamic>> todaysChallenge() async =>
       (await _send('POST', '/challenges/today')) as Map<String, dynamic>;
 
@@ -79,6 +87,10 @@ class Api {
   // Heatmap
   static Future<Map<String, dynamic>> heatmap() async =>
       (await _get('/heatmap')) as Map<String, dynamic>;
+
+  // Live progress log (polled while loading)
+  static Future<Map<String, dynamic>> progress() async =>
+      (await _get('/progress')) as Map<String, dynamic>;
 }
 
 class ApiException implements Exception {

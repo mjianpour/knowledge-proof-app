@@ -52,13 +52,25 @@ def _challenged_today() -> set[str]:
     return {row["topic_id"] for row in rows}
 
 
-def pick_topic() -> dict:
+def pick_topics(count: int, allowed_ids: list[str] | None = None) -> list[dict]:
+    """Rotation for a batch of `count` challenges.
+
+    Optionally restricted to a user-selected subset of topics; otherwise all
+    topics are eligible ("automatic"). Rotation rules are unchanged: skip
+    topics already challenged today until every eligible topic has been used,
+    then cycle back through, ordered by overdue-ness with the
+    least-recently-challenged tie-break.
+    """
     topics = db().table("topics").select("*").execute().data
     if not topics:
         raise HTTPException(status_code=404, detail="No topics exist yet. Add one on the Settings page.")
+    if allowed_ids:
+        allowed = set(allowed_ids)
+        topics = [t for t in topics if t["id"] in allowed]
+        if not topics:
+            raise HTTPException(status_code=400, detail="None of the selected topics exist anymore.")
 
     last_seen = _last_challenge_times()
-    used_today = _challenged_today()
 
     def sort_key(topic: dict):
         # Empty string sorts before any ISO timestamp -> never-challenged first.
@@ -68,9 +80,23 @@ def pick_topic() -> dict:
             topic["name"],
         )
 
-    fresh = [t for t in topics if t["id"] not in used_today]
-    pool = fresh if fresh else topics  # cycle back once every topic was used today
-    return min(pool, key=sort_key)
+    ordered = sorted(topics, key=sort_key)
+    used = {tid for tid in _challenged_today() if any(t["id"] == tid for t in ordered)}
+
+    picks: list[dict] = []
+    for _ in range(count):
+        fresh = [t for t in ordered if t["id"] not in used]
+        if not fresh:  # every eligible topic used today -> start a new cycle
+            used = set()
+            fresh = ordered
+        chosen = fresh[0]
+        used.add(chosen["id"])
+        picks.append(chosen)
+    return picks
+
+
+def pick_topic() -> dict:
+    return pick_topics(1)[0]
 
 
 def apply_score(topic_id: str, score: int) -> dict:

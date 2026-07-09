@@ -20,12 +20,27 @@ class Heatmap extends StatelessWidget {
   String _key(DateTime d) =>
       '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  // GitHub's contribution-graph green scales (empty + 4 intensity levels).
+  static const _githubLight = [
+    Color(0xFFEBEDF0),
+    Color(0xFF9BE9A8),
+    Color(0xFF40C463),
+    Color(0xFF30A14E),
+    Color(0xFF216E39),
+  ];
+  static const _githubDark = [
+    Color(0xFF161B22),
+    Color(0xFF0E4429),
+    Color(0xFF006D32),
+    Color(0xFF26A641),
+    Color(0xFF39D353),
+  ];
+
   Color _color(BuildContext context, int count) {
-    final scheme = Theme.of(context).colorScheme;
-    if (count <= 0) return scheme.surfaceContainerHighest;
-    final level = count >= 4 ? 4 : count;
-    return Color.lerp(
-        scheme.primaryContainer, scheme.primary, (level - 1) / 3)!;
+    final scale = Theme.of(context).brightness == Brightness.dark
+        ? _githubDark
+        : _githubLight;
+    return scale[count <= 0 ? 0 : (count >= 4 ? 4 : count)];
   }
 
   @override

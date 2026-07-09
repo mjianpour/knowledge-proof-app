@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../widgets/progress_ticker.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -27,6 +28,7 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _loading = true;
   bool _saving = false;
   bool _syncing = false;
+  bool _uploading = false;
 
   @override
   void initState() {
@@ -133,12 +135,18 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _syncing = true);
     try {
       final result = await Api.syncGithub();
-      _toast('Synced ${result['synced']} notes from ${result['repo']} '
-          '(${result['matched_to_topics']} matched to topics).');
+      final created = (result['topics_created'] as List<dynamic>?) ?? [];
+      var message = 'Synced ${result['synced']} notes from ${result['repo']} '
+          '(${result['matched_to_topics']} matched to topics).';
+      if (created.isNotEmpty) {
+        message += ' New topics: ${created.join(', ')}.';
+      }
+      _toast(message);
+      await _load(); // pick up auto-created topics
     } catch (e) {
       _toast('Sync failed: $e');
     } finally {
-      setState(() => _syncing = false);
+      if (mounted) setState(() => _syncing = false);
     }
   }
 
@@ -151,7 +159,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final file = picked?.files.firstOrNull;
     if (file == null || file.bytes == null) return;
 
-    _toast('Uploading and distilling "${file.name}" — this takes a minute...');
+    setState(() => _uploading = true);
     try {
       final result =
           await Api.uploadPdf(topic['id'] as String, file.name, file.bytes!);
@@ -159,6 +167,8 @@ class _SettingsPageState extends State<SettingsPage> {
           'chunks + LLM digest (${result['digest_source']}).');
     } catch (e) {
       _toast('PDF upload failed: $e');
+    } finally {
+      if (mounted) setState(() => _uploading = false);
     }
   }
 
@@ -330,6 +340,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                     _topicsSection(),
+                    if (_uploading) ...[
+                      const SizedBox(height: 12),
+                      const Center(child: ProgressTicker(lines: 4)),
+                    ],
                     const SizedBox(height: 32),
                     FilledButton.icon(
                       onPressed: _saving ? null : _save,
@@ -529,9 +543,14 @@ class _SettingsPageState extends State<SettingsPage> {
                 label: Text(_syncing ? 'Syncing...' : 'Sync vault now'),
               ),
             ),
+            if (_syncing || _uploading) ...[
+              const SizedBox(height: 12),
+              const ProgressTicker(lines: 4),
+            ],
             Text(
-              'Save settings first if you changed the URL or token. Vault folders are '
-              'matched to topics by name (e.g. a "Quantum Mechanics" folder).',
+              'Save settings first if you changed the URL or token. Top-level vault '
+              'folders become topics automatically on sync (dot/underscore folders '
+              'are skipped); notes are matched to topics by folder name.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],

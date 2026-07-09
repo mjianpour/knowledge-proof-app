@@ -12,11 +12,12 @@ Context strategy (per user's design):
 from __future__ import annotations
 
 import random
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from fastapi import HTTPException
 
-from backend import llm, scheduler
+from backend import llm, progress, scheduler
 from backend.db import db
 
 MAX_NOTE_CHARS = 4000        # per sampled note
@@ -52,20 +53,35 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def build_context(topic: dict) -> str:
+    """Assemble the study-material context for one topic.
+
+    Contents are fetched *after* sampling: only the few sampled notes/chunks
+    are downloaded from Supabase, not the whole vault — with large vaults the
+    old fetch-everything approach dominated generation time.
+    """
     parts: list[str] = []
 
     if topic.get("book_reference"):
         parts.append(f"REFERENCE BOOK: the user is studying this topic from: {topic['book_reference']}")
 
-    notes = (
+    note_meta = (
         db().table("notes")
-        .select("path, content")
+        .select("id, path")
         .eq("topic_id", topic["id"])
         .execute()
         .data
     )
-    if notes:
-        for note in random.sample(notes, min(NOTE_SAMPLE, len(notes))):
+    if note_meta:
+        sampled = random.sample(note_meta, min(NOTE_SAMPLE, len(note_meta)))
+        notes = (
+            db().table("notes")
+            .select("path, content")
+            .in_("id", [n["id"] for n in sampled])
+            .execute()
+            .data
+        )
+        progress.log(f"{topic['name']}: sampled {len(notes)} of {len(note_meta)} vault notes")
+        for note in notes:
             parts.append(
                 f"USER'S NOTE ({note['path']}):\n{_truncate(note['content'], MAX_NOTE_CHARS)}"
             )
@@ -82,17 +98,29 @@ def build_context(topic: dict) -> str:
         parts.append(
             f"DIGEST OF UPLOADED PDF ({digest['filename']}):\n{_truncate(digest['content'], 12000)}"
         )
+    if digests:
+        progress.log(f"{topic['name']}: included {len(digests)} PDF digest(s)")
 
-    chunks = (
+    chunk_meta = (
         db().table("pdf_excerpts")
-        .select("filename, chunk_index, content")
+        .select("id, filename, chunk_index")
         .eq("topic_id", topic["id"])
         .eq("is_digest", False)
         .execute()
         .data
     )
-    if chunks:
-        for chunk in random.sample(chunks, min(CHUNK_SAMPLE, len(chunks))):
+    if chunk_meta:
+        sampled = random.sample(chunk_meta, min(CHUNK_SAMPLE, len(chunk_meta)))
+        chunks = (
+            db().table("pdf_excerpts")
+            .select("filename, chunk_index, content")
+            .in_("id", [c["id"] for c in sampled])
+            .execute()
+            .data
+        )
+        progress.log(
+            f"{topic['name']}: sampled {len(chunks)} of {len(chunk_meta)} PDF excerpts")
+        for chunk in chunks:
             parts.append(
                 f"EXCERPT FROM {chunk['filename']} (chunk {chunk['chunk_index']}):\n"
                 f"{_truncate(chunk['content'], MAX_CHUNK_CHARS)}"
@@ -115,6 +143,94 @@ Formatting rules (the client renders GitHub-flavored markdown with LaTeX):
 - All code goes in fenced code blocks with a language tag (```dart, ```python, ...).
 - All mathematics goes in LaTeX: $...$ inline, $$...$$ for display equations. Never write plain-text formulas like p^2/2m or hbar — write $\\frac{p^2}{2m}$ and $\\hbar$.
 - Use markdown structure (short paragraphs, lists) where it helps readability."""
+
+
+def _build_prompt(topic: dict) -> str:
+    context = build_context(topic)
+    return (
+        f"Topic for today's challenge: {topic['name']}\n\n"
+        f"Student's study material for this topic:\n\n"
+        f"{context if context else '(no material uploaded yet — use standard core concepts of the topic)'}\n\n"
+        "Generate today's single conceptual challenge now."
+    )
+
+
+def _call_llm_for_question(topic_name: str, prompt: str) -> str:
+    provider, model = llm.provider_config()
+    with progress.task(f"Asking {provider}/{model} to write the '{topic_name}' question"):
+        # effort tunes down latency on Anthropic models; ignored elsewhere.
+        question = llm.generate_text(GENERATION_SYSTEM, prompt,
+                                     max_tokens=4096, effort="medium").strip()
+    if not question:
+        raise HTTPException(status_code=502, detail="The LLM returned an empty challenge. Try again.")
+    return question
+
+
+def _generate_question_text(topic: dict) -> str:
+    return _call_llm_for_question(topic["name"], _build_prompt(topic))
+
+
+def _session_rows(today: str) -> list[dict]:
+    rows = (
+        db().table("challenges")
+        .select("id, challenge_date, question, user_answer, evaluation, score, status, created_at, topics(name)")
+        .eq("challenge_date", today)
+        .order("created_at")
+        .execute()
+        .data
+    )
+    return [
+        {
+            "id": r["id"],
+            "date": r["challenge_date"],
+            "topic": (r.get("topics") or {}).get("name", "?"),
+            "question": r["question"],
+            "user_answer": r["user_answer"],
+            "evaluation": r["evaluation"],
+            "score": r["score"],
+            "status": r["status"],
+        }
+        for r in rows
+    ]
+
+
+def generate_session(count: int, topic_ids: list[str] | None = None) -> dict:
+    """Ensure `count` challenges exist for today (answered + pending), then
+    return the full day's list. Missing ones are generated up front — topics
+    rotate per the scheduler, question texts are produced in parallel.
+    """
+    today = date.today().isoformat()
+    existing = _session_rows(today)
+
+    need = count - len(existing)
+    if need > 0:
+        with progress.task(f"Preparing today's session — generating {need} new question(s)"):
+            topics = scheduler.pick_topics(need, allowed_ids=topic_ids or None)
+            progress.log("Scheduler picked: " + ", ".join(t["name"] for t in topics))
+
+            # Context assembly (all the heavy Supabase reads) runs
+            # sequentially up front; only the LLM calls are parallelized.
+            # Keeping bulk transfers off concurrent connections avoids the
+            # intermittent 'Server disconnected' errors seen in the logs.
+            prompts = [_build_prompt(t) for t in topics]
+
+            with ThreadPoolExecutor(max_workers=min(need, 3)) as pool:
+                questions = list(pool.map(
+                    lambda pair: _call_llm_for_question(pair[0]["name"], pair[1]),
+                    zip(topics, prompts),
+                ))
+
+            # Insert sequentially so created_at keeps the intended order.
+            for topic, question in zip(topics, questions):
+                db().table("challenges").insert({
+                    "topic_id": topic["id"],
+                    "challenge_date": today,
+                    "question": question,
+                    "status": "pending",
+                }).execute()
+        existing = _session_rows(today)
+
+    return {"questions": existing, "answered_today": _answered_today(today)}
 
 
 def _answered_today(today: str) -> int:
@@ -153,15 +269,7 @@ def generate_challenge() -> dict:
         }
 
     topic = scheduler.pick_topic()
-    context = build_context(topic)
-    user_prompt = (
-        f"Topic for today's challenge: {topic['name']}\n\n"
-        f"Student's study material for this topic:\n\n{context if context else '(no material uploaded yet — use standard core concepts of the topic)'}\n\n"
-        "Generate today's single conceptual challenge now."
-    )
-    question = llm.generate_text(GENERATION_SYSTEM, user_prompt, max_tokens=4096).strip()
-    if not question:
-        raise HTTPException(status_code=502, detail="The LLM returned an empty challenge. Try again.")
+    question = _generate_question_text(topic)
 
     row = (
         db().table("challenges")
@@ -215,7 +323,9 @@ def evaluate_answer(challenge_id: str, answer: str) -> dict:
         f"STUDENT'S ANSWER:\n{answer}\n\n"
         "Evaluate now."
     )
-    result = llm.generate_json(EVALUATION_SYSTEM, user_prompt, EVALUATION_SCHEMA, max_tokens=4096)
+    provider, model = llm.provider_config()
+    with progress.task(f"Grading your '{topic_name}' answer with {provider}/{model}"):
+        result = llm.generate_json(EVALUATION_SYSTEM, user_prompt, EVALUATION_SCHEMA, max_tokens=4096)
 
     score = max(0, min(100, int(result.get("score", 0))))
     feedback = result.get("feedback", "").strip()

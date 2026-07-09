@@ -16,6 +16,8 @@ class _HomePageState extends State<HomePage> {
   Map<String, Map<String, dynamic>> _dayData = {};
   int _totalChallenges = 0;
   int _dailyTarget = 1;
+  List<Map<String, dynamic>> _topics = [];
+  final Set<String> _selectedTopicIds = {};
   String? _error;
   bool _loading = true;
 
@@ -24,6 +26,16 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _loadHeatmap();
     _loadDailyTarget();
+    _loadTopics();
+  }
+
+  Future<void> _loadTopics() async {
+    try {
+      final topics = await Api.listTopics();
+      setState(() => _topics = topics.cast<Map<String, dynamic>>());
+    } catch (_) {
+      // Topic filter is optional — automatic selection still works without it.
+    }
   }
 
   Future<void> _loadDailyTarget() async {
@@ -71,8 +83,9 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _openChallenge() async {
     final target = _dailyTarget; // read live at click time
-    await Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => ChallengePage(target: target)));
+    final topicIds = _selectedTopicIds.toList();
+    await Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => ChallengePage(target: target, topicIds: topicIds)));
     _loadHeatmap(); // refresh the heatmap after completing challenges
   }
 
@@ -105,8 +118,12 @@ class _HomePageState extends State<HomePage> {
                 const Spacer(),
                 FilledButton.icon(
                   onPressed: _openChallenge,
-                  icon: const Icon(Icons.psychology),
-                  label: const Text("Today's Challenge"),
+                  icon: const Icon(Icons.psychology, size: 24),
+                  label: const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 14, horizontal: 6),
+                    child: Text("Today's Challenge",
+                        style: TextStyle(fontSize: 18)),
+                  ),
                 ),
                 const SizedBox(height: 12),
                 Text(
@@ -120,7 +137,7 @@ class _HomePageState extends State<HomePage> {
                   constraints: const BoxConstraints(maxWidth: 520),
                   child: Row(
                     children: [
-                      Text('Questions today',
+                      Text('Number of Questions',
                           style: Theme.of(context).textTheme.labelLarge),
                       Expanded(
                         child: Slider(
@@ -144,6 +161,42 @@ class _HomePageState extends State<HomePage> {
                     ],
                   ),
                 ),
+                if (_topics.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 640),
+                    child: Column(
+                      children: [
+                        Text(
+                          _selectedTopicIds.isEmpty
+                              ? 'Topics — none selected, chosen automatically by the scheduler'
+                              : 'Topics — questions drawn from your selection',
+                          style: Theme.of(context).textTheme.labelLarge,
+                        ),
+                        const SizedBox(height: 8),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          alignment: WrapAlignment.center,
+                          children: [
+                            for (final topic in _topics)
+                              FilterChip(
+                                label: Text(topic['name'] as String? ?? '?'),
+                                selected: _selectedTopicIds
+                                    .contains(topic['id'] as String),
+                                onSelected: (selected) => setState(() {
+                                  final id = topic['id'] as String;
+                                  selected
+                                      ? _selectedTopicIds.add(id)
+                                      : _selectedTopicIds.remove(id);
+                                }),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 const Spacer(),
                 Align(
                   alignment: Alignment.centerLeft,

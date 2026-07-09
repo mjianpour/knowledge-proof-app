@@ -15,7 +15,7 @@ import io
 from fastapi import HTTPException
 from pypdf import PdfReader
 
-from backend import llm
+from backend import llm, progress
 from backend.db import db
 
 CHUNK_CHARS = 6000
@@ -52,24 +52,33 @@ def ingest(topic_id: str, filename: str, pdf_bytes: bytes) -> dict:
         raise HTTPException(status_code=404, detail="Topic not found.")
     topic_name = topic_rows[0]["name"]
 
-    text = extract_text(pdf_bytes)
-    chunks = _chunk(text)
+    with progress.task(f"Ingesting '{filename}' for {topic_name}"):
+        progress.log("Extracting text with pypdf...")
+        text = extract_text(pdf_bytes)
+        chunks = _chunk(text)
+        progress.log(f"Extracted {len(text):,} characters -> {len(chunks)} chunks")
 
-    # One-time LLM distillation: native file input if supported, else the extracted text.
-    prompt = DIGEST_PROMPT.format(topic=topic_name)
-    if 0 < len(pdf_bytes) <= llm.native_pdf_limit():
-        digest = llm.digest_pdf_native(pdf_bytes, prompt)
-        digest_source = "native-pdf"
-    else:
-        digest = llm.generate_text(
-            "You are a precise study-material analyst.",
-            f"{prompt}\n\nDOCUMENT TEXT:\n{text[:150000]}",
-            max_tokens=8192,
-        )
-        digest_source = "extracted-text"
+        # One-time LLM distillation: native file input if supported, else the extracted text.
+        provider, model = llm.provider_config()
+        prompt = DIGEST_PROMPT.format(topic=topic_name)
+        if 0 < len(pdf_bytes) <= llm.native_pdf_limit():
+            progress.log(f"Sending the PDF itself to {provider}/{model} for the "
+                         "one-time distillation (can take a minute)...")
+            digest = llm.digest_pdf_native(pdf_bytes, prompt)
+            digest_source = "native-pdf"
+        else:
+            progress.log(f"Distilling extracted text with {provider}/{model} "
+                         "(native PDF not supported here)...")
+            digest = llm.generate_text(
+                "You are a precise study-material analyst.",
+                f"{prompt}\n\nDOCUMENT TEXT:\n{text[:150000]}",
+                max_tokens=8192,
+            )
+            digest_source = "extracted-text"
+        progress.log(f"Digest ready ({len(digest):,} chars); storing rows...")
 
-    # Replace any previous ingestion of the same file for this topic.
-    db().table("pdf_excerpts").delete().eq("topic_id", topic_id).eq("filename", filename).execute()
+        # Replace any previous ingestion of the same file for this topic.
+        db().table("pdf_excerpts").delete().eq("topic_id", topic_id).eq("filename", filename).execute()
 
     rows = [
         {"topic_id": topic_id, "filename": filename, "chunk_index": i, "content": chunk, "is_digest": False}

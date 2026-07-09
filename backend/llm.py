@@ -18,9 +18,10 @@ import base64
 import json
 import re
 
+import httpx
 from fastapi import HTTPException
 
-from backend import config
+from backend import config, progress
 from backend.db import get_setting
 
 DEFAULT_MODELS = {
@@ -47,6 +48,66 @@ NATIVE_PDF_LIMITS = {
     "anthropic": 25 * 1024 * 1024,
     "gemini": 14 * 1024 * 1024,
 }
+
+
+def _probe_key(provider: str, key: str) -> bool:
+    """Cheap authenticated GET against the provider's model list."""
+    try:
+        with httpx.Client(timeout=10) as client:
+            if provider == "anthropic":
+                r = client.get(
+                    "https://api.anthropic.com/v1/models",
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
+                )
+            elif provider == "openai":
+                r = client.get(
+                    "https://api.openai.com/v1/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            elif provider == "deepseek":
+                r = client.get(
+                    f"{DEEPSEEK_BASE_URL}/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            else:  # gemini (Google AI Studio)
+                r = client.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": key},
+                )
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def detect_provider(api_key: str) -> str:
+    """Figure out which provider an arbitrary API key belongs to.
+
+    The key's format narrows the candidates (OpenAI and DeepSeek both use
+    'sk-...', so format alone is ambiguous), then each candidate is verified
+    with a real authenticated request until one accepts the key.
+    """
+    key = api_key.strip()
+    if key.startswith("sk-ant-"):
+        candidates = ["anthropic"]
+    elif key.startswith("AIza"):
+        candidates = ["gemini"]
+    elif key.startswith("sk-"):
+        candidates = ["openai", "deepseek"]
+    else:
+        candidates = ["anthropic", "openai", "deepseek", "gemini"]
+
+    for provider in candidates:
+        progress.log(f"Checking the key against {provider}...")
+        if _probe_key(provider, key):
+            progress.log(f"✓ Key authenticated with {provider}")
+            return provider
+
+    raise HTTPException(
+        status_code=400,
+        detail="This key was not accepted by any supported provider "
+               f"(tried: {', '.join(candidates)}). Check that it was copied "
+               "completely and is active.",
+    )
 
 
 def provider_config() -> tuple[str, str]:
@@ -89,7 +150,7 @@ def _anthropic_text(response) -> str:
 
 
 def _anthropic_generate(model: str, system: str, content, max_tokens: int,
-                        schema: dict | None = None) -> str:
+                        schema: dict | None = None, effort: str | None = None) -> str:
     kwargs: dict = {
         "model": model,
         "max_tokens": max_tokens,
@@ -97,8 +158,13 @@ def _anthropic_generate(model: str, system: str, content, max_tokens: int,
         "thinking": {"type": "adaptive"},
         "messages": [{"role": "user", "content": content}],
     }
+    output_config: dict = {}
+    if effort is not None:
+        output_config["effort"] = effort
     if schema is not None:
-        kwargs["output_config"] = {"format": {"type": "json_schema", "schema": schema}}
+        output_config["format"] = {"type": "json_schema", "schema": schema}
+    if output_config:
+        kwargs["output_config"] = output_config
     response = _anthropic_client().messages.create(**kwargs)
     return _anthropic_text(response)
 
@@ -175,18 +241,21 @@ def _gemini_generate(model: str, system: str, contents, max_tokens: int,
 # ---------------------------------------------------------------------------
 
 def _dispatch(provider: str, model: str, system: str, user_text: str,
-              max_tokens: int, schema: dict | None) -> str:
+              max_tokens: int, schema: dict | None, effort: str | None = None) -> str:
     if provider == "anthropic":
-        return _anthropic_generate(model, system, user_text, max_tokens, schema=schema)
+        return _anthropic_generate(model, system, user_text, max_tokens,
+                                   schema=schema, effort=effort)
     if provider == "gemini":
         return _gemini_generate(model, system, user_text, max_tokens, schema=schema)
     return _openai_compat_generate(provider, model, system, user_text, max_tokens, schema=schema)
 
 
-def generate_text(system: str, user_text: str, max_tokens: int = 4096) -> str:
+def generate_text(system: str, user_text: str, max_tokens: int = 4096,
+                  effort: str | None = None) -> str:
+    """`effort` tunes latency vs depth on Anthropic models; ignored elsewhere."""
     provider, model = provider_config()
     try:
-        return _dispatch(provider, model, system, user_text, max_tokens, None)
+        return _dispatch(provider, model, system, user_text, max_tokens, None, effort)
     except HTTPException:
         raise
     except Exception as exc:  # surface provider errors to the UI with context
